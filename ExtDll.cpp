@@ -105,7 +105,7 @@ static std::wstring ReadIniString(const wchar_t *section, const wchar_t *key, co
 
 static int ReadIniInt(const wchar_t *section, const wchar_t *key, int defVal, const std::wstring &iniPath) {
 	wchar_t buf[64] = {0};
-	_wsnprintf_s(buf, _countof(buf), _TRUNCATE, L"%d", defVal);
+	_snwprintf_s(buf, _countof(buf), _TRUNCATE, L"%d", defVal);
 	GetPrivateProfileStringW(section, key, buf, buf, (DWORD)_countof(buf), iniPath.c_str());
 	return _wtoi(buf);
 }
