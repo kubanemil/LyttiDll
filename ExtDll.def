@@ -1,0 +1,4 @@
+LIBRARY ExtDll
+EXPORTS
+	GetCardInfoEx @1
+	TransactionsEx @2
