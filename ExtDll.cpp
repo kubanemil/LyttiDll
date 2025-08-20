@@ -6,6 +6,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cstring>
+#include <cstdarg>
 
 #pragma comment(lib, "winhttp.lib")
 
@@ -57,6 +58,13 @@ struct TransactionEx122 {
 
 static const DWORD MAX_OUT_LEN = 150 * 1024; // 150 KB
 
+// Logging globals
+static CRITICAL_SECTION g_LogCs;
+static bool g_LogInit = false;
+static std::wstring g_LogPath;
+static int g_LogLevel = 2; // 0=off,1=error,2=info,3=debug
+static bool g_LogDebugOutput = false;
+
 static std::wstring ToWide(const std::string &s) {
 	if (s.empty()) return std::wstring();
 	int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
@@ -93,6 +101,59 @@ static std::wstring ReadIniString(const wchar_t *section, const wchar_t *key, co
 	wchar_t buf[512] = {0};
 	GetPrivateProfileStringW(section, key, defVal, buf, (DWORD)(sizeof(buf) / sizeof(buf[0])), iniPath.c_str());
 	return std::wstring(buf);
+}
+
+static int ReadIniInt(const wchar_t *section, const wchar_t *key, int defVal, const std::wstring &iniPath) {
+	wchar_t buf[64] = {0};
+	_wsnprintf_s(buf, _countof(buf), _TRUNCATE, L"%d", defVal);
+	GetPrivateProfileStringW(section, key, buf, buf, (DWORD)_countof(buf), iniPath.c_str());
+	return _wtoi(buf);
+}
+
+static void InitLoggingOnce() {
+	if (g_LogInit) return;
+	InitializeCriticalSection(&g_LogCs);
+	std::wstring iniPath = GetModuleDirectory() + L"\\ExtDll.ini";
+	g_LogPath = ReadIniString(L"Logging", L"LogFile", L"ExtDll.log", iniPath);
+	if (g_LogPath.find(L"\\") == std::wstring::npos && g_LogPath.find(L"/") == std::wstring::npos) {
+		g_LogPath = GetModuleDirectory() + L"\\" + g_LogPath;
+	}
+	g_LogLevel = ReadIniInt(L"Logging", L"LogLevel", 2, iniPath);
+	g_LogDebugOutput = ReadIniInt(L"Logging", L"DebugOutput", 0, iniPath) != 0;
+	g_LogInit = true;
+}
+
+static void WriteLogLineVA(int level, const wchar_t *fmt, va_list ap) {
+	if (level <= 0 || g_LogLevel <= 0 || level > g_LogLevel) return;
+	InitLoggingOnce();
+	wchar_t line[1024];
+	_vsnwprintf_s(line, _countof(line), _TRUNCATE, fmt, ap);
+	SYSTEMTIME st; GetLocalTime(&st);
+	wchar_t prefix[64];
+	const wchar_t *lvl = (level==1?L"ERR":(level==2?L"INF":L"DBG"));
+	_snwprintf_s(prefix, _countof(prefix), _TRUNCATE, L"%04u-%02u-%02u %02u:%02u:%02u.%03u [%s] ",
+		st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, lvl);
+	std::wstring wmsg = std::wstring(prefix) + line + L"\r\n";
+	if (g_LogDebugOutput) OutputDebugStringW(wmsg.c_str());
+	std::string msg = FromWide(wmsg);
+	EnterCriticalSection(&g_LogCs);
+	HANDLE h = CreateFileW(g_LogPath.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (h != INVALID_HANDLE_VALUE) {
+		DWORD written = 0;
+		WriteFile(h, msg.data(), (DWORD)msg.size(), &written, NULL);
+		CloseHandle(h);
+	}
+	LeaveCriticalSection(&g_LogCs);
+}
+
+static void LogInfo(const wchar_t *fmt, ...) {
+	va_list ap; va_start(ap, fmt); WriteLogLineVA(2, fmt, ap); va_end(ap);
+}
+static void LogError(const wchar_t *fmt, ...) {
+	va_list ap; va_start(ap, fmt); WriteLogLineVA(1, fmt, ap); va_end(ap);
+}
+static void LogDebug(const wchar_t *fmt, ...) {
+	va_list ap; va_start(ap, fmt); WriteLogLineVA(3, fmt, ap); va_end(ap);
 }
 
 // Minimal base64 for binary payloads
@@ -245,12 +306,12 @@ static bool JsonFindArrayInt64(const std::string &json, const std::string &key, 
 static bool HttpPostJson(const std::wstring &host, const std::wstring &path, const std::string &body, std::string &responseBody, const std::wstring &apiKey = L"") {
 	responseBody.clear();
 	HINTERNET hSession = WinHttpOpen(L"LyttiDll/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-	if (!hSession) return false;
+	if (!hSession) { LogError(L"WinHttpOpen failed: %lu", GetLastError()); return false; }
 	HINTERNET hConnect = WinHttpConnect(hSession, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
-	if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
+	if (!hConnect) { LogError(L"WinHttpConnect failed: %lu", GetLastError()); WinHttpCloseHandle(hSession); return false; }
 	DWORD flags = WINHTTP_FLAG_SECURE;
 	HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", path.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
-	if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+	if (!hRequest) { LogError(L"WinHttpOpenRequest failed: %lu", GetLastError()); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
 	std::wstring headers = L"Content-Type: application/json\r\n";
 	if (!apiKey.empty()) {
 		headers += L"Authorization: Bearer ";
@@ -259,17 +320,22 @@ static bool HttpPostJson(const std::wstring &host, const std::wstring &path, con
 	}
 	BOOL sent = WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.size(), (LPVOID)body.data(), (DWORD)body.size(), (DWORD)body.size(), 0);
 	if (!sent) {
+		LogError(L"WinHttpSendRequest failed: %lu", GetLastError());
 		WinHttpCloseHandle(hRequest);
 		WinHttpCloseHandle(hConnect);
 		WinHttpCloseHandle(hSession);
 		return false;
 	}
 	if (!WinHttpReceiveResponse(hRequest, NULL)) {
+		LogError(L"WinHttpReceiveResponse failed: %lu", GetLastError());
 		WinHttpCloseHandle(hRequest);
 		WinHttpCloseHandle(hConnect);
 		WinHttpCloseHandle(hSession);
 		return false;
 	}
+	DWORD statusCode = 0, statusSize = sizeof(statusCode);
+	WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
+	LogDebug(L"HTTP %s %s -> %lu", host.c_str(), path.c_str(), statusCode);
 	DWORD dwSize = 0;
 	do {
 		DWORD dwDownloaded = 0;
@@ -283,6 +349,7 @@ static bool HttpPostJson(const std::wstring &host, const std::wstring &path, con
 	WinHttpCloseHandle(hRequest);
 	WinHttpCloseHandle(hConnect);
 	WinHttpCloseHandle(hSession);
+	LogDebug(L"HTTP response length: %u", (UINT)responseBody.size());
 	return true;
 }
 
@@ -359,7 +426,9 @@ extern "C" __declspec(dllexport) int __stdcall GetCardInfoEx(
 	std::wstring host, path, txPath, apiKey;
 	LoadConfig(host, path, txPath, apiKey);
 	std::string response;
+	LogInfo(L"GetCardInfoEx card=%lld rest=%u unit=%u inpLen=%u", (long long)Card, Restaurant, UnitNo, InpLen);
 	if (!HttpPostJson(host, path, os.str(), response, apiKey)) {
+		LogError(L"GetCardInfoEx request failed");
 		return 1; // treat as not found
 	}
 	// Optionally pass-through response to OutBuf if present
@@ -380,6 +449,7 @@ extern "C" __declspec(dllexport) int __stdcall GetCardInfoEx(
 	bool exists = false;
 	JsonFindBool(response, "exists", exists);
 	if (!exists) {
+		LogInfo(L"GetCardInfoEx: card not found");
 		return 1;
 	}
 	ZeroMemorySafe(ci, sizeof(CardInfo1164));
@@ -411,6 +481,7 @@ extern "C" __declspec(dllexport) int __stdcall GetCardInfoEx(
 	if (JsonFindString(response, "infoArbitrary", s)) CopyAsciiz(ci->cardInfo, sizeof(ci->cardInfo), s);
 	if (JsonFindString(response, "infoDisplay", s)) CopyAsciiz(ci->displayInfo, sizeof(ci->displayInfo), s);
 	if (JsonFindString(response, "infoPrint", s)) CopyAsciiz(ci->printInfo, sizeof(ci->printInfo), s);
+	LogInfo(L"GetCardInfoEx: OK");
 	return 0;
 }
 
@@ -482,7 +553,9 @@ extern "C" __declspec(dllexport) int __stdcall TransactionsEx(
 	std::wstring host, path, txPath, apiKey;
 	LoadConfig(host, path, txPath, apiKey);
 	std::string response;
+	LogInfo(L"TransactionsEx count=%u inpLen=%u", Count, InpLen);
 	if (!HttpPostJson(host, txPath, os.str(), response, apiKey)) {
+		LogError(L"TransactionsEx request failed");
 		return 1;
 	}
 	// Out data passthrough if any
@@ -500,7 +573,9 @@ extern "C" __declspec(dllexport) int __stdcall TransactionsEx(
 	}
 	bool allProcessed = false;
 	JsonFindBool(response, "allProcessed", allProcessed);
-	return allProcessed ? 0 : 1;
+	int rc = allProcessed ? 0 : 1;
+	LogInfo(L"TransactionsEx: %s", rc==0?L"OK":L"FAILED");
+	return rc;
 }
 
 // Optional DllMain
@@ -508,6 +583,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 	switch (ul_reason_for_call) {
 	case DLL_PROCESS_ATTACH:
 		DisableThreadLibraryCalls(hModule);
+		InitLoggingOnce();
 		break;
 	case DLL_THREAD_ATTACH:
 	case DLL_THREAD_DETACH:
