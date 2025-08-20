@@ -2,3 +2,5 @@ LIBRARY ExtDll
 EXPORTS
 	GetCardInfoEx @1
 	TransactionsEx @2
+	Init @3
+	Done @4

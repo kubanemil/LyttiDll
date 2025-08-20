@@ -578,6 +578,15 @@ extern "C" __declspec(dllexport) int __stdcall TransactionsEx(
 	return rc;
 }
 
+extern "C" __declspec(dllexport) void __stdcall Init() {
+	InitLoggingOnce();
+	LogInfo(L"Init: called");
+}
+
+extern "C" __declspec(dllexport) void __stdcall Done() {
+	LogInfo(L"Done: called");
+}
+
 // Optional DllMain
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
 	switch (ul_reason_for_call) {
