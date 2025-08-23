@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#pragma pack(push, 1)
 struct CardInfo1164 {
 	WORD	structureSize;
 	BYTE	wasDeleted;
@@ -25,6 +26,7 @@ struct CardInfo1164 {
 	char	displayInfo[256];
 	char	printInfo[256];
 };
+#pragma pack(pop)
 
 typedef int(__stdcall *GetCardInfoExFn)(
 	__int64 Card,
@@ -62,6 +64,11 @@ int main(int argc, char** argv) {
 	if (!h) {
 		std::cerr << "LoadLibrary failed: " << GetLastError() << "\n";
 		return 1;
+	}
+	// Call Init to initialize logging and prove logging works
+	typedef void (__stdcall *InitFn)();
+	if (auto pInit = reinterpret_cast<InitFn>(GetProcAddress(h, "Init"))) {
+		pInit();
 	}
 	auto pGet = reinterpret_cast<GetCardInfoExFn>(GetProcAddress(h, "GetCardInfoEx"));
 	if (!pGet) {

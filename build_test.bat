@@ -11,7 +11,8 @@ cl /nologo /W4 /O2 /EHsc TestGetCard.cpp /Fe:TestGetCard.exe || goto :eof
 
 echo.
 echo Running test (DLL must be alongside EXE or on PATH)...
-copy /Y ExtDll.dll TestGetCard.exe.local 1>nul 2>nul
+echo Current dir: %cd%
+dir /b ExtDll.*
 TestGetCard.exe ExtDll.dll
 endlocal
 
