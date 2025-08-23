@@ -1,0 +1,5 @@
+*.exe
+*.exe.local
+.vs
+*.obj
+*.dll
